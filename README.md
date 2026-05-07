@@ -371,19 +371,6 @@ RSI-14 · MACD · MACD Signal · MACD Histogram · Bollinger Upper/Middle/Lower 
 
 ---
 
-## Phát hiện bất thường
-
-| Loại | Điều kiện | Mức độ |
-|---|---|---|
-| Price Spike | Giá thay đổi > 1% trong 5 giây | HIGH |
-| Volume Surge | Khối lượng > 3× trung bình 30 phút trước | MEDIUM |
-| Spread Widening | Spread > 2× trung bình 1 giờ trước | MEDIUM |
-| Low Liquidity | Tổng bid+ask < 20% trung bình 24 giờ | LOW |
-
-Cảnh báo mức HIGH và MEDIUM được gửi qua **email tự động** — người dùng nhận được trong vòng 5 giây kể cả khi không mở dashboard.
-
----
-
 ## REST API
 
 Base URL: `http://localhost:8000`  
