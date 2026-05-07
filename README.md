@@ -1,6 +1,31 @@
 # Binance Streaming Realtime Analytics Platform
 
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
+![Spark](https://img.shields.io/badge/Apache%20Spark-3.5.1-orange?logo=apachespark)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-7.5.0-black?logo=apachekafka)
+![dbt](https://img.shields.io/badge/dbt-1.7-red?logo=dbt)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)
+![License](https://img.shields.io/badge/License-MIT-green)
+
 > Hệ thống phân tích dữ liệu thị trường tiền điện tử theo thời gian thực — end-to-end data pipeline từ Binance WebSocket đến dashboard trực quan, với độ trễ dưới 5 giây.
+
+---
+
+## Demo
+
+> **Thêm GIF demo vào đây sau khi quay màn hình:**
+> 1. Quay dashboard tại `http://localhost:8000/dashboard` bằng [ScreenToGif](https://www.screentogif.com/)
+> 2. Lưu file vào `docs/screenshots/demo.gif`
+> 3. Thay dòng dưới bằng: `![Demo](docs/screenshots/demo.gif)`
+
+| Market Overview | Technical Analysis | Order Flow |
+|---|---|---|
+| *(screenshot)* | *(screenshot)* | *(screenshot)* |
+
+**Dashboard gồm 3 tab chính:**
+- **Market Overview** — Bảng giá realtime 8 đồng tiền, nến 1 phút, volume
+- **Technical Analysis** — RSI-14, MACD, Bollinger Bands cập nhật sau mỗi nến đóng
+- **Order Flow** — Tỷ lệ mua/bán chủ động, áp lực thị trường, spread bid/ask
 
 ---
 
@@ -15,7 +40,7 @@ Binance WebSocket
 Apache Kafka  ──────────────────────────────► Azure Data Lake (Parquet)
       │
       ▼
-Apache Spark Structured Streaming (4 jobs)
+Apache Spark Structured Streaming (5 jobs)
       │
       ▼
 PostgreSQL (Star Schema, 90 ngày)
@@ -23,9 +48,9 @@ PostgreSQL (Star Schema, 90 ngày)
       ▼
 dbt Transformation  ◄──── Apache Airflow (schedule mỗi 5 phút)
       │
-      ├──► Custom Dashboard (FastAPI + Chart.js)
-      ├──► Apache Superset (3 dashboards, 18 charts)
-      └──► Prometheus + Grafana (system monitoring)
+      ├──► Custom Dashboard (FastAPI + Chart.js)   ← http://localhost:8000/dashboard
+      ├──► Apache Superset (BI platform)           ← http://localhost:8088
+      └──► Prometheus + Grafana (system monitoring)← http://localhost:3000
 ```
 
 **8 đồng tiền theo dõi:** BTCUSDT · ETHUSDT · BNBUSDT · SOLUSDT · XRPUSDT · DOGEUSDT · ADAUSDT · AVAXUSDT
@@ -102,13 +127,14 @@ binance_streaming_realtime/
 │   └── alertmanager.yml        # Email routing cho 2 nhóm alert
 │
 ├── grafana/
-│   └── dashboards/             # Grafana dashboard JSON
+│   └── dashboards/             # Grafana dashboard JSON (git-ignored)
 │
 ├── scripts/
 │   ├── create_topics.py        # Tạo 3 Kafka topics
 │   ├── generate_dim_datetime.py# Sinh 525.600 dòng dim_datetime
 │   └── create_superset_dashboards.py
 │
+├── docs/                       # Tài liệu phân tích & screenshots
 ├── jars/                       # Spark JAR dependencies (git-ignored)
 ├── .env.example                # Template biến môi trường
 ├── docker-compose.yml          # 13 services
@@ -132,20 +158,28 @@ binance_streaming_realtime/
 
 ---
 
-## Khởi động nhanh
+## Hướng dẫn chạy
 
-### 1. Clone và cấu hình
+### Bước 1 — Clone và cấu hình môi trường
 
 ```bash
-git clone https://github.com/<your-username>/binance_streaming_realtime.git
+git clone https://github.com/damduc2004/binance_streaming_realtime.git
 cd binance_streaming_realtime
 
 # Tạo file .env từ template
 cp .env.example .env
-# Điền các giá trị cần thiết (xem phần Cấu hình bên dưới)
 ```
 
-### 2. Tải Spark JAR dependencies
+Mở `.env` và điền tối thiểu các giá trị sau để chạy local (Azure và email là tuỳ chọn):
+
+```env
+POSTGRES_USER=binance
+POSTGRES_PASSWORD=binance123
+DATABASE_URL=postgresql://binance:binance123@postgres:5432/binance_dw
+SUPERSET_SECRET_KEY=supersecretkey123
+```
+
+### Bước 2 — Tải Spark JAR dependencies
 
 Tạo thư mục `jars/` và tải các file JAR sau vào đó:
 
@@ -158,44 +192,82 @@ jars/
 └── postgresql-42.7.3.jar
 ```
 
-> Tải từ [Maven Central](https://search.maven.org/) hoặc chạy một lần với `--packages` để Spark tự tải về `~/.ivy2/`.
+> Tải từ [Maven Central](https://search.maven.org/) hoặc chạy một lần với `spark-submit --packages ...` để Spark tự tải về `~/.ivy2/`.
 
-### 3. Khởi tạo Airflow (chỉ lần đầu)
+### Bước 3 — Khởi tạo Airflow (chỉ lần đầu)
 
 ```bash
 docker compose up airflow-init
 ```
 
-### 4. Khởi động toàn bộ stack
+Chờ đến khi thấy `airflow-init exited with code 0`.
+
+### Bước 4 — Khởi động toàn bộ stack
 
 ```bash
 docker compose up -d
 ```
 
-Chờ 2–3 phút để tất cả services sẵn sàng.
-
-### 5. Tạo Kafka topics và khởi tạo dữ liệu chiều
+Chờ **2–3 phút** để tất cả services sẵn sàng. Kiểm tra trạng thái:
 
 ```bash
-# Tạo 3 Kafka topics
-docker exec binance-producer python scripts/create_topics.py
-
-# Sinh dim_datetime (525.600 dòng — chạy một lần)
-# Hoặc trigger DAG dag_init_dimensions trên Airflow UI
+docker compose ps
 ```
 
-### 6. Truy cập các services
+Tất cả services phải ở trạng thái `Up` hoặc `healthy`.
+
+### Bước 5 — Tạo Kafka topics và khởi tạo dimension data
+
+```bash
+# Tạo 3 Kafka topics (binance.trades, binance.klines, binance.bookticker)
+docker exec binance-producer python scripts/create_topics.py
+
+# Khởi tạo dim_datetime (525.600 dòng, chạy một lần duy nhất)
+docker exec binance-producer python scripts/generate_dim_datetime.py
+```
+
+> Hoặc vào Airflow UI → trigger DAG `dag_init_dimensions` thủ công.
+
+### Bước 6 — Khởi động Spark jobs
+
+```bash
+# Job 1: OHLCV + Order Flow aggregation
+docker exec binance-spark-master spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.3 \
+  processor/job1_trade_agg.py
+
+# Job 2: Kline sink + Technical indicators
+docker exec binance-spark-master spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.3 \
+  processor/job2_kline_sink.py
+
+# Job 3: Spread snapshot
+docker exec binance-spark-master spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.3 \
+  processor/job3_spread_agg.py
+
+# Job 4: Alert detection
+docker exec binance-spark-master spark-submit \
+  --packages org.postgresql:postgresql:42.7.3 \
+  processor/job4_alert_detect.py
+```
+
+> Nếu đã có JAR trong thư mục `jars/`, thay `--packages` bằng `--jars jars/*.jar`.
+
+### Bước 7 — Truy cập dashboard và services
 
 | Service | URL | Thông tin đăng nhập |
 |---|---|---|
 | **Custom Dashboard** | http://localhost:8000/dashboard | — |
-| FastAPI Docs | http://localhost:8000/docs | — |
-| Airflow | http://localhost:8090 | admin / admin |
-| Spark Master UI | http://localhost:8080 | — |
-| Apache Superset | http://localhost:8088 | admin / admin |
-| Grafana | http://localhost:3000 | admin / admin |
-| Prometheus | http://localhost:9090 | — |
-| Kafka UI | http://localhost:8081 | — |
+| **FastAPI Docs** | http://localhost:8000/docs | — |
+| **Airflow** | http://localhost:8090 | admin / admin |
+| **Spark Master UI** | http://localhost:8080 | — |
+| **Apache Superset** | http://localhost:8088 | admin / admin |
+| **Grafana** | http://localhost:3000 | admin / admin |
+| **Prometheus** | http://localhost:9090 | — |
+| **Kafka UI** | http://localhost:8081 | — |
+
+Sau khoảng **30–60 giây** kể từ khi Spark jobs chạy, dữ liệu sẽ bắt đầu xuất hiện trên dashboard tại `http://localhost:8000/dashboard`.
 
 ---
 
@@ -212,12 +284,12 @@ POSTGRES_USER=binance
 POSTGRES_PASSWORD=<your-password>
 DATABASE_URL=postgresql://binance:<password>@postgres:5432/binance_dw
 
-# Azure Data Lake (tùy chọn — cần cho Job 5 RawSink)
+# Azure Data Lake (tuỳ chọn — cần cho Job 5 RawSink)
 AZURE_STORAGE_ACCOUNT=<your-storage-account>
 AZURE_STORAGE_KEY=<your-storage-key>
 AZURE_CONTAINER=crypto-raw
 
-# Azure Container Registry (tùy chọn — cần cho CI/CD)
+# Azure Container Registry (tuỳ chọn — cần cho CI/CD)
 ACR_LOGIN_SERVER=
 ACR_USERNAME=
 ACR_PASSWORD=
@@ -240,7 +312,6 @@ ALERT_EMAIL_FROM=your-email@gmail.com
 ALERT_EMAIL_PASSWORD=<gmail-app-password>
 ALERT_EMAIL_TO=your-email@gmail.com
 ```
-
 
 ---
 
@@ -401,4 +472,3 @@ Swagger UI tại: http://localhost:8000/docs
 - Mở rộng lên 50+ đồng tiền (chỉ cần cập nhật config)
 - Tích hợp cảnh báo qua Telegram bot
 - Triển khai mô hình anomaly detection bằng ML
-
