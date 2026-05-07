@@ -1,0 +1,118 @@
+{
+  "title": "Dashboard 1 — Tổng quan thị trường",
+  "uid": "market-overview",
+  "tags": ["binance", "realtime"],
+  "refresh": "2s",
+  "time": {"from": "now-2h", "to": "now"},
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Bảng giá thời gian thực",
+      "type": "table",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 7},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT symbol, display_name, category, last_price, price_change, ROUND(price_change_pct::numeric * 100, 4) AS change_pct, volume, trade_count, trading_session, updated_at FROM public_public.mart_latest_prices ORDER BY symbol",
+        "format": "table", "refId": "A"
+      }],
+      "options": {"cellHeight": "sm", "footer": {"show": false}},
+      "fieldConfig": {
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "last_price"}, "properties": [{"id": "unit", "value": "currencyUSD"}, {"id": "decimals", "value": 4}, {"id": "custom.width", "value": 120}]},
+          {"matcher": {"id": "byName", "options": "change_pct"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 4}, {"id": "custom.displayMode", "value": "color-background"}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}]},
+          {"matcher": {"id": "byName", "options": "volume"}, "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 2}]},
+          {"matcher": {"id": "byName", "options": "trade_count"}, "properties": [{"id": "unit", "value": "short"}]},
+          {"matcher": {"id": "byName", "options": "price_change"}, "properties": [{"id": "unit", "value": "currencyUSD"}, {"id": "decimals", "value": 4}, {"id": "custom.displayMode", "value": "color-text"}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}]}
+        ]
+      }
+    },
+
+    {
+      "id": 2,
+      "title": "Biểu đồ giá BTC theo thời gian",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 7, "w": 16, "h": 8},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT TO_TIMESTAMP(window_start / 1000) AS time, close AS \"BTCUSDT\", vwap AS \"VWAP\" FROM public_staging.stg_trade_agg WHERE symbol = 'BTCUSDT' AND window_type = '1s' AND TO_TIMESTAMP(window_start/1000) > NOW() - INTERVAL '2 hours' ORDER BY time",
+        "format": "time_series", "refId": "A"
+      }],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "custom": {"lineWidth": 2}}},
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+
+    {
+      "id": 3,
+      "title": "Đồng hồ áp lực Mua / Bán",
+      "type": "gauge",
+      "gridPos": {"x": 16, "y": 7, "w": 8, "h": 8},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT symbol, ROUND(buy_pct::numeric, 1) AS buy_pct FROM public_public.mart_orderflow_summary ORDER BY symbol",
+        "format": "table", "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 40}, {"color": "green", "value": 60}]},
+          "mappings": []
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "showThresholdLabels": true, "showThresholdMarkers": true}
+    },
+
+    {
+      "id": 4,
+      "title": "Khối lượng giao dịch theo giây (BTCUSDT)",
+      "type": "barchart",
+      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 7},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT TO_TIMESTAMP(window_start / 1000) AS time, volume FROM public_staging.stg_trade_agg WHERE symbol = 'BTCUSDT' AND window_type = '1s' AND TO_TIMESTAMP(window_start/1000) > NOW() - INTERVAL '30 minutes' ORDER BY time DESC LIMIT 120",
+        "format": "time_series", "refId": "A"
+      }],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": 0}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]}}},
+      "options": {"xTickLabelRotation": -30}
+    },
+
+    {
+      "id": 5,
+      "title": "Bảng cảnh báo đang hoạt động",
+      "type": "table",
+      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 7},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT symbol, alert_code, alert_description, severity, triggered_at, is_resolved FROM public_public.mart_alert_summary WHERE triggered_at > NOW() - INTERVAL '24 hours' ORDER BY triggered_at DESC LIMIT 30",
+        "format": "table", "refId": "A"
+      }],
+      "options": {"cellHeight": "sm"},
+      "fieldConfig": {
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "severity"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}, {"id": "mappings", "value": [{"type": "value", "options": {"HIGH": {"color": "red", "index": 0}, "MEDIUM": {"color": "orange", "index": 1}, "LOW": {"color": "yellow", "index": 2}}}]}]},
+          {"matcher": {"id": "byName", "options": "is_resolved"}, "properties": [{"id": "custom.width", "value": 80}, {"id": "mappings", "value": [{"type": "value", "options": {"true": {"text": "✓", "color": "green", "index": 0}, "false": {"text": "●", "color": "red", "index": 1}}}]}]}
+        ]
+      }
+    },
+
+    {
+      "id": 6,
+      "title": "Bản đồ nhiệt Spread (% chênh lệch mua/bán)",
+      "type": "table",
+      "gridPos": {"x": 0, "y": 22, "w": 24, "h": 6},
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "cfld7r9p0l4w0d"},
+      "targets": [{
+        "rawSql": "SELECT symbol, trading_session, ROUND(avg_spread_pct::numeric, 6) AS avg_spread_pct, ROUND(avg_spread_abs::numeric, 6) AS avg_spread_abs, ROUND(avg_imbalance::numeric, 4) AS avg_imbalance, snapshot_count FROM public_public.mart_spread_by_session ORDER BY symbol, trading_session",
+        "format": "table", "refId": "A"
+      }],
+      "options": {"cellHeight": "sm"},
+      "fieldConfig": {
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "avg_spread_pct"}, "properties": [{"id": "unit", "value": "percentunit"}, {"id": "decimals", "value": 4}, {"id": "custom.displayMode", "value": "color-background"}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 0.0001}, {"color": "red", "value": 0.001}]}}]},
+          {"matcher": {"id": "byName", "options": "avg_imbalance"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": -1}, {"color": "yellow", "value": -0.1}, {"color": "green", "value": 0.1}]}}]}
+        ]
+      }
+    }
+
+  ]
+}

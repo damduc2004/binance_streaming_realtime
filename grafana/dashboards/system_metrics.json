@@ -1,0 +1,75 @@
+{
+  "title": "System Metrics",
+  "uid": "system-metrics",
+  "tags": ["infra", "prometheus"],
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Kafka Messages Produced (trades)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "rate(binance_messages_sent_total[1m])", "legendFormat": "{{topic}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 2,
+      "title": "Producer WebSocket Errors",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "rate(binance_websocket_errors_total[1m])", "legendFormat": "errors/s", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"fixedColor": "red", "mode": "fixed"}}}
+    },
+    {
+      "id": 3,
+      "title": "PostgreSQL Active Connections",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "pg_stat_activity_count{datname=\"binance_dw\"}", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 4,
+      "title": "PostgreSQL DB Size",
+      "type": "stat",
+      "gridPos": {"x": 6, "y": 8, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "pg_database_size_bytes{datname=\"binance_dw\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "id": 5,
+      "title": "PostgreSQL Transactions/s",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [
+        {"expr": "rate(pg_stat_database_xact_commit_total{datname=\"binance_dw\"}[1m])", "legendFormat": "commits/s", "refId": "A"},
+        {"expr": "rate(pg_stat_database_xact_rollback_total{datname=\"binance_dw\"}[1m])", "legendFormat": "rollbacks/s", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 6,
+      "title": "API Request Rate",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "rate(http_requests_total[1m])", "legendFormat": "{{handler}} {{status_code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 7,
+      "title": "API Request Latency p95",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "efld7r5cgg8owc"},
+      "targets": [{"expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1m]))", "legendFormat": "p95 latency", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    }
+  ]
+}

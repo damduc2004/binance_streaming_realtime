@@ -1,0 +1,58 @@
+version: 2
+
+sources:
+  - name: public
+    database: binance_dw
+    schema: public
+    tables:
+      - name: fact_trade_agg
+        description: OHLCV aggregate từ raw trades
+        columns:
+          - name: trade_agg_key
+            tests: [not_null, unique]
+          - name: symbol_key
+            tests: [not_null]
+          - name: price_change_pct
+            tests: [not_null]
+
+      - name: fact_order_flow
+        columns:
+          - name: order_flow_key
+            tests: [not_null, unique]
+          - name: buy_pct
+            tests:
+              - not_null
+
+      - name: fact_kline_closed
+        columns:
+          - name: kline_key
+            tests: [not_null, unique]
+          - name: is_bullish
+            tests: [not_null]
+
+      - name: fact_technical_indicator
+        columns:
+          - name: tech_key
+            tests: [not_null, unique]
+
+      - name: fact_spread_snapshot
+        columns:
+          - name: spread_key
+            tests: [not_null, unique]
+          - name: spread
+            tests: [not_null]
+
+      - name: fact_price_alert
+        columns:
+          - name: alert_key
+            tests: [not_null, unique]
+          - name: severity
+            tests:
+              - accepted_values:
+                  values: ['LOW', 'MEDIUM', 'HIGH']
+
+      - name: dim_symbol
+      - name: dim_datetime
+      - name: dim_window_type
+      - name: dim_kline_interval
+      - name: dim_alert_type

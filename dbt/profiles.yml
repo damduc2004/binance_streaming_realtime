@@ -1,0 +1,13 @@
+binance:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('PGHOST', 'postgres') }}"
+      port: 5432
+      user: "{{ env_var('PGUSER', 'binance') }}"
+      password: "{{ env_var('PGPASSWORD', 'binance') }}"
+      dbname: binance_dw
+      schema: public
+      threads: 4
+      keepalives_idle: 0

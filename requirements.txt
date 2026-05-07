@@ -1,0 +1,20 @@
+# Binance Streaming Realtime — Python dependencies
+
+# Ingestion
+confluent-kafka>=2.3.0
+websocket-client>=1.7.0
+python-dotenv>=1.0.0
+
+# Processing (Spark submitted separately via spark-submit)
+# pyspark>=3.5.0
+
+# dbt
+dbt-postgres>=1.7.0
+
+# API
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Utils
+pandas>=2.0.0
+requests>=2.31.0

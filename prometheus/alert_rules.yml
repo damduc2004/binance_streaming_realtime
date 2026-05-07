@@ -1,0 +1,25 @@
+groups:
+  - name: pipeline_alerts
+    rules:
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_group_lag > 10000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag cao ({{ $value }} messages)"
+
+      - alert: PostgresInsertRateZero
+        expr: rate(pg_stat_user_tables_n_tup_ins[3m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL không nhận dữ liệu trong 3 phút"
+
+      - alert: ProducerReconnectHigh
+        expr: increase(ws_reconnect_total[5m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket reconnect > 3 lần trong 5 phút"

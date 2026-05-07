@@ -1,0 +1,30 @@
+global:
+  smtp_smarthost: "smtp.gmail.com:587"
+  smtp_from: "${ALERT_EMAIL_FROM}"
+  smtp_auth_username: "${ALERT_EMAIL_FROM}"
+  smtp_auth_password: "${ALERT_EMAIL_PASSWORD}"
+  smtp_require_tls: true
+
+route:
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "ops-email"
+  routes:
+    - match:
+        severity: critical
+      receiver: "ops-email"
+      repeat_interval: 1h
+
+receivers:
+  - name: "ops-email"
+    email_configs:
+      - to: "${ALERT_EMAIL_TO}"
+        send_resolved: true
+        html: |
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b><br/>
+          {{ .Annotations.summary }}<br/>
+          Status: {{ .Status }}
+          {{ end }}

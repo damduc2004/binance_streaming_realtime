@@ -1,0 +1,503 @@
+version: "3.9"
+
+# =============================================================================
+# Binance Streaming Realtime — Docker Compose
+# Services: Zookeeper, Kafka, Schema Registry, PostgreSQL, Producer,
+#           Spark (master + 2 workers), Airflow, Superset, FastAPI,
+#           Prometheus, Grafana, AlertManager
+# =============================================================================
+
+x-kafka-env: &kafka-env
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+x-spark-env: &spark-env
+  KAFKA_BOOTSTRAP: kafka:29092
+  DATABASE_URL: postgresql://binance:binance@postgres:5432/binance_dw
+  AZURE_STORAGE_ACCOUNT: ${AZURE_STORAGE_ACCOUNT}
+  AZURE_STORAGE_KEY: ${AZURE_STORAGE_KEY}
+  AZURE_CONTAINER: ${AZURE_CONTAINER:-crypto-raw}
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.4-python3.11
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    DATABASE_URL: postgresql://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/binance_dw
+    _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.7.17"
+    KAFKA_BOOTSTRAP: kafka:29092
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./scripts:/opt/airflow/scripts
+    - ./dbt:/dbt
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Zookeeper — required by Kafka
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Kafka — message broker, 3 topics
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"   # external (host access)
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_MS: 604800000   # 7 ngày
+      KAFKA_LOG_SEGMENT_BYTES: 134217728  # 128MB
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Schema Registry — Avro schema management (optional, dùng JSON hiện tại)
+  # ---------------------------------------------------------------------------
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.3
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Kafka Topic Creator — chạy một lần để tạo 3 topics
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >-
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic binance.trades --partitions 10 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic binance.klines --partitions 5 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic binance.bookticker --partitions 10 --replication-factor 1 --config retention.ms=604800000 &&
+      echo 'Topics created.'
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Star Schema data warehouse
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-binance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-binance}
+      POSTGRES_DB: binance_dw
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./postgres/init_airflow.sql:/docker-entrypoint-initdb.d/02_airflow.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-binance} -d binance_dw"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Postgres Exporter — expose metrics for Prometheus
+  # ---------------------------------------------------------------------------
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/binance_dw?sslmode=disable"
+    ports:
+      - "9187:9187"
+
+  # ---------------------------------------------------------------------------
+  # Binance WebSocket Producer
+  # ---------------------------------------------------------------------------
+  producer:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    container_name: producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+    restart: unless-stopped
+    ports:
+      - "8001:8001"   # Prometheus metrics endpoint
+
+  # ---------------------------------------------------------------------------
+  # Apache Spark — Master + 2 Workers
+  # ---------------------------------------------------------------------------
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    entrypoint: ["/opt/spark/sbin/start-master.sh"]
+    environment:
+      <<: *spark-env
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"   # Spark Master UI
+      - "7077:7077"   # Spark master port
+      - "4040:4040"   # Spark app UI (when job runs)
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark-worker-1:
+    image: apache/spark:3.5.1
+    container_name: spark-worker-1
+    entrypoint: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    ports:
+      - "8181:8081"
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+    mem_limit: 2g
+
+  spark-worker-2:
+    image: apache/spark:3.5.1
+    container_name: spark-worker-2
+    entrypoint: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8082"
+    ports:
+      - "8182:8082"
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+    mem_limit: 2g
+
+  spark-worker-3:
+    image: apache/spark:3.5.1
+    container_name: spark-worker-3
+    entrypoint: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8083"
+    ports:
+      - "8183:8083"
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+    mem_limit: 2g
+
+  # ---------------------------------------------------------------------------
+  # Spark Job Runners — tự restart nếu crash
+  # ---------------------------------------------------------------------------
+  spark-job1:
+    image: apache/spark:3.5.1
+    container_name: spark-job1
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *spark-env
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+      - spark_ivy_cache:/opt/ivy2
+    user: root
+    entrypoint: []
+    command:
+      - /bin/bash
+      - -c
+      - "pip install psycopg2-binary --quiet && PYTHONPATH=/opt/spark-apps /opt/spark/bin/spark-submit --master spark://spark-master:7077 --jars /opt/ivy2/jars/org.apache.spark_spark-sql-kafka-0-10_2.12-3.5.1.jar,/opt/ivy2/jars/org.postgresql_postgresql-42.7.3.jar,/opt/ivy2/jars/org.apache.spark_spark-token-provider-kafka-0-10_2.12-3.5.1.jar,/opt/ivy2/jars/org.apache.kafka_kafka-clients-3.4.1.jar,/opt/ivy2/jars/org.apache.commons_commons-pool2-2.11.1.jar,/opt/ivy2/jars/org.lz4_lz4-java-1.8.0.jar,/opt/ivy2/jars/org.xerial.snappy_snappy-java-1.1.10.3.jar,/opt/ivy2/jars/org.slf4j_slf4j-api-2.0.7.jar,/opt/ivy2/jars/com.google.code.findbugs_jsr305-3.0.0.jar,/opt/ivy2/jars/commons-logging_commons-logging-1.1.3.jar,/opt/ivy2/jars/org.checkerframework_checker-qual-3.42.0.jar --conf spark.driver.host=spark-job1 --conf spark.driver.bindAddress=0.0.0.0 /opt/spark-apps/processor/job1_trade_agg.py"
+    restart: unless-stopped
+    mem_limit: 2g
+
+  spark-job2:
+    image: apache/spark:3.5.1
+    container_name: spark-job2
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *spark-env
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+      - spark_checkpoints:/opt/spark-checkpoints
+      - spark_ivy_cache:/opt/ivy2
+    user: root
+    entrypoint: []
+    command:
+      - /bin/bash
+      - -c
+      - "pip install psycopg2-binary numpy --quiet && PYTHONPATH=/opt/spark-apps /opt/spark/bin/spark-submit --master spark://spark-master:7077 --jars /opt/ivy2/jars/org.apache.spark_spark-sql-kafka-0-10_2.12-3.5.1.jar,/opt/ivy2/jars/org.postgresql_postgresql-42.7.3.jar,/opt/ivy2/jars/org.apache.spark_spark-token-provider-kafka-0-10_2.12-3.5.1.jar,/opt/ivy2/jars/org.apache.kafka_kafka-clients-3.4.1.jar,/opt/ivy2/jars/org.apache.commons_commons-pool2-2.11.1.jar,/opt/ivy2/jars/org.lz4_lz4-java-1.8.0.jar,/opt/ivy2/jars/org.xerial.snappy_snappy-java-1.1.10.3.jar,/opt/ivy2/jars/org.slf4j_slf4j-api-2.0.7.jar,/opt/ivy2/jars/com.google.code.findbugs_jsr305-3.0.0.jar,/opt/ivy2/jars/commons-logging_commons-logging-1.1.3.jar,/opt/ivy2/jars/org.checkerframework_checker-qual-3.42.0.jar --conf spark.driver.host=spark-job2 --conf spark.driver.bindAddress=0.0.0.0 /opt/spark-apps/processor/job2_kline_sink.py"
+    restart: unless-stopped
+    mem_limit: 2g
+
+  spark-job4:
+    image: python:3.11-slim
+    container_name: spark-job4
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/binance_dw
+    volumes:
+      - ./processor:/opt/spark-apps/processor
+    working_dir: /opt/spark-apps
+    entrypoint: []
+    command:
+      - /bin/bash
+      - -c
+      - "pip install psycopg2-binary --quiet && python -m processor.job4_alert_detect"
+    restart: unless-stopped
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Apache Airflow — Orchestration
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password ${AIRFLOW_PASSWORD:-admin} \
+          --firstname Admin \
+          --lastname Admin \
+          --role Admin \
+          --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8090:8080"
+    command: webserver
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: scheduler
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # dbt — chạy theo lệnh từ Airflow, không phải long-lived service
+  # Container này chỉ dùng làm runner qua docker exec hoặc Airflow DockerOperator
+  # ---------------------------------------------------------------------------
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-postgres:1.7.17
+    container_name: dbt
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DBT_PROFILES_DIR: /dbt
+    volumes:
+      - ./dbt:/dbt
+    entrypoint: ["tail", "-f", "/dev/null"]   # keep alive, Airflow exec vào
+
+  # ---------------------------------------------------------------------------
+  # FastAPI — REST API
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/binance_dw
+      API_KEY: ${API_KEY:-dev-secret-key}
+    volumes:
+      - ./api/static:/app/api/static
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Apache Superset — BI Dashboard
+  # ---------------------------------------------------------------------------
+  superset:
+    image: apache/superset:3.1.3
+    container_name: superset
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-supersecret}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-binance}:${POSTGRES_PASSWORD:-binance}@postgres:5432/binance_dw
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    command: >
+      bash -c "
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname Admin --email admin@superset.com --password ${SUPERSET_ADMIN_PASSWORD:-admin} || true &&
+        superset init &&
+        gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 120 'superset.app:create_app()'
+      "
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — metrics collection
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Grafana — metrics visualization
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # AlertManager — email notifications
+  # ---------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    restart: unless-stopped
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  postgres_data:
+  spark_checkpoints:
+  spark_ivy_cache:
+  airflow_logs:
+  superset_home:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:

@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Binance Streaming Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --bg2: #161b27; --bg3: #1e2535;
+    --border: #2a3249; --text: #e2e8f0; --muted: #64748b;
+    --green: #22c55e; --red: #ef4444; --blue: #3b82f6; --amber: #f59e0b;
+    --green-bg: rgba(34,197,94,0.1); --red-bg: rgba(239,68,68,0.1); --blue-bg: rgba(59,130,246,0.1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 13px; min-height: 100vh; }
+
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
+  .logo { font-size: 15px; font-weight: 700; color: var(--blue); letter-spacing: -0.3px; }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .live-badge { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--green); font-weight: 500; }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.85)} }
+  .last-update { font-size: 11px; color: var(--muted); }
+  #conn-status { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--red-bg); color: var(--red); }
+  #conn-status.ok { background: var(--green-bg); color: var(--green); }
+
+  .tabs { display: flex; gap: 2px; padding: 10px 20px 0; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .tab-btn { padding: 7px 16px; font-size: 12px; font-weight: 500; color: var(--muted); background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer; transition: all .15s; }
+  .tab-btn.active { color: var(--blue); border-bottom-color: var(--blue); }
+  .tab-btn:hover:not(.active) { color: var(--text); }
+
+  .page { display: none; padding: 16px 20px; }
+  .page.active { display: block; }
+
+  .grid { display: grid; gap: 12px; }
+  .g2 { grid-template-columns: 1fr 1fr; }
+  .g3 { grid-template-columns: 1fr 1fr 1fr; }
+  .g4 { grid-template-columns: repeat(4, 1fr); }
+  .span2 { grid-column: span 2; }
+  .span3 { grid-column: span 3; }
+  .span4 { grid-column: span 4; }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+  .chart-wrap { position: relative; }
+
+  /* KPI strip */
+  .kpi { display: flex; flex-direction: column; gap: 2px; }
+  .kpi-label { font-size: 10px; color: var(--muted); }
+  .kpi-val { font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.5px; }
+  .kpi-sub { font-size: 12px; font-weight: 500; }
+  .up { color: var(--green); } .down { color: var(--red); }
+
+  /* Price table */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { color: var(--muted); font-weight: 500; text-align: left; padding: 4px 8px 8px; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+  td { padding: 7px 8px; border-bottom: 1px solid rgba(42,50,73,.6); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg3); }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+  .badge-high { background: rgba(239,68,68,.15); color: var(--red); }
+  .badge-med  { background: rgba(245,158,11,.15); color: var(--amber); }
+  .badge-low  { background: rgba(59,130,246,.15);  color: var(--blue); }
+
+  /* Gauge */
+  .gauge-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0; }
+  .gauge-label { font-size: 18px; font-weight: 700; }
+
+  /* Section label */
+  .section-label { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 8px 0 6px; padding-left: 2px; }
+
+  /* Spread heatmap row */
+  .heatmap-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .heatmap-sym { font-size: 11px; color: var(--muted); width: 64px; flex-shrink: 0; }
+  .heatmap-bar-wrap { flex: 1; height: 18px; border-radius: 4px; overflow: hidden; background: var(--bg3); }
+  .heatmap-bar { height: 100%; border-radius: 4px; transition: width .4s; }
+  .heatmap-val { font-size: 11px; width: 52px; text-align: right; }
+
+  /* Alert rows */
+  .alert-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid rgba(42,50,73,.5); }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-sym { font-size: 12px; font-weight: 600; width: 80px; }
+  .alert-desc { flex: 1; font-size: 11px; color: var(--muted); }
+  .alert-time { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+  /* Spinner */
+  .spinner { text-align: center; padding: 40px; color: var(--muted); font-size: 12px; }
+
+  @media (max-width: 900px) { .g3,.g4 { grid-template-columns: 1fr 1fr; } .span3,.span4 { grid-column: span 2; } }
+  @media (max-width: 600px) { .g2,.g3,.g4 { grid-template-columns: 1fr; } .span2,.span3,.span4 { grid-column: span 1; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">⚡ Binance Analytics</div>
+  <div class="header-right">
+    <span id="conn-status">Connecting…</span>
+    <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+    <span class="last-update" id="last-update">–</span>
+  </div>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="showTab('overview',this)">📊 Tổng quan</button>
+  <button class="tab-btn" onclick="showTab('kline',this)">🕯 Nến & Kỹ thuật</button>
+  <button class="tab-btn" onclick="showTab('flow',this)">💸 Order Flow</button>
+  <button class="tab-btn" onclick="showTab('alerts',this)">🔔 Cảnh báo</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     TAB 1 — TỔNG QUAN
+═══════════════════════════════════════════════ -->
+<div id="tab-overview" class="page active">
+  <div class="grid g4" style="margin-bottom:12px;">
+    <div class="card kpi" id="kpi-price"><div class="kpi-label">BTC / USDT</div><div class="kpi-val" id="kpi-btc-price">–</div><div class="kpi-sub" id="kpi-btc-chg">–</div></div>
+    <div class="card kpi"><div class="kpi-label">ETH / USDT</div><div class="kpi-val" id="kpi-eth-price">–</div><div class="kpi-sub" id="kpi-eth-chg">–</div></div>
+    <div class="card kpi"><div class="kpi-label">BNB / USDT</div><div class="kpi-val" id="kpi-bnb-price">–</div><div class="kpi-sub" id="kpi-bnb-chg">–</div></div>
+    <div class="card kpi"><div class="kpi-label">Phiên giao dịch</div><div class="kpi-val" id="kpi-session" style="font-size:14px;margin-top:4px;">–</div><div class="kpi-sub" id="kpi-symbols">– symbols</div></div>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:12px;">
+    <div class="card span2">
+      <div class="card-title">Giá BTC theo thời gian thực (2 phút gần nhất)</div>
+      <div class="chart-wrap" style="height:130px"><canvas id="btc-line"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid g3" style="margin-bottom:12px;">
+    <div class="card">
+      <div class="card-title">Khối lượng / giây</div>
+      <div class="chart-wrap" style="height:100px"><canvas id="vol-bar"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Áp lực Mua / Bán</div>
+      <div class="gauge-wrap" style="height:100px;">
+        <canvas id="gauge-canvas" width="180" height="90"></canvas>
+        <div class="gauge-label" id="gauge-label">–</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Spread (%) — 8 coins</div>
+      <div id="spread-heatmap"><div class="spinner">Đang tải…</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Bảng giá — 8 coins</div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Giá</th><th>Thay đổi</th><th>% Thay đổi</th><th>Volume</th><th>Giao dịch</th><th>Phiên</th></tr></thead>
+      <tbody id="price-table"><tr><td colspan="7" class="spinner">Đang tải…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     TAB 2 — NẾN & KỸ THUẬT
+═══════════════════════════════════════════════ -->
+<div id="tab-kline" class="page">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <label style="font-size:12px;color:var(--muted);">Symbol:</label>
+    <select id="kline-symbol" onchange="loadKline()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;">
+      <option>BTCUSDT</option><option>ETHUSDT</option><option>BNBUSDT</option>
+      <option>SOLUSDT</option><option>XRPUSDT</option><option>ADAUSDT</option>
+      <option>DOGEUSDT</option><option>MATICUSDT</option>
+    </select>
+    <button onclick="loadKline()" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;">Refresh</button>
+  </div>
+
+  <div class="grid g4" style="margin-bottom:12px;">
+    <div class="card kpi"><div class="kpi-label">RSI (14)</div><div class="kpi-val" id="rsi-val" style="font-size:22px;">–</div></div>
+    <div class="card kpi"><div class="kpi-label">MACD</div><div class="kpi-val" id="macd-val" style="font-size:22px;">–</div></div>
+    <div class="card kpi"><div class="kpi-label">BB Width</div><div class="kpi-val" id="bb-val" style="font-size:22px;">–</div></div>
+    <div class="card kpi"><div class="kpi-label">Signal tổng hợp</div><div class="kpi-val" id="sig-val" style="font-size:14px;margin-top:4px;">–</div></div>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:12px;">
+    <div class="card span2">
+      <div class="card-title">Biểu đồ nến (50 nến gần nhất)</div>
+      <canvas id="kline-canvas" style="width:100%;height:200px;"></canvas>
+    </div>
+  </div>
+
+  <div class="grid g3">
+    <div class="card">
+      <div class="card-title">RSI (14)</div>
+      <div class="chart-wrap" style="height:100px"><canvas id="rsi-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">MACD</div>
+      <div class="chart-wrap" style="height:100px"><canvas id="macd-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Bollinger Bands</div>
+      <div class="chart-wrap" style="height:100px"><canvas id="bb-chart"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     TAB 3 — ORDER FLOW
+═══════════════════════════════════════════════ -->
+<div id="tab-flow" class="page">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <label style="font-size:12px;color:var(--muted);">Symbol:</label>
+    <select id="flow-symbol" onchange="loadFlow()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;">
+      <option>BTCUSDT</option><option>ETHUSDT</option><option>BNBUSDT</option>
+      <option>SOLUSDT</option><option>XRPUSDT</option><option>ADAUSDT</option>
+      <option>DOGEUSDT</option><option>MATICUSDT</option>
+    </select>
+  </div>
+
+  <div class="grid g3" style="margin-bottom:12px;">
+    <div class="card kpi"><div class="kpi-label">Tổng Buy Volume</div><div class="kpi-val" id="flow-buy" style="font-size:18px;color:var(--green);">–</div></div>
+    <div class="card kpi"><div class="kpi-label">Tổng Sell Volume</div><div class="kpi-val" id="flow-sell" style="font-size:18px;color:var(--red);">–</div></div>
+    <div class="card kpi"><div class="kpi-label">Net Flow</div><div class="kpi-val" id="flow-net" style="font-size:18px;">–</div></div>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:12px;">
+    <div class="card">
+      <div class="card-title">Buy vs Sell Volume theo giây</div>
+      <div class="chart-wrap" style="height:140px"><canvas id="flow-area"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Net Flow (dòng tiền ròng)</div>
+      <div class="chart-wrap" style="height:140px"><canvas id="net-flow-line"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Order Flow Summary — Tất cả symbols</div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Buy Vol</th><th>Sell Vol</th><th>Net Flow</th><th>Buy %</th><th>Trạng thái</th></tr></thead>
+      <tbody id="flow-table"><tr><td colspan="6" class="spinner">Đang tải…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     TAB 4 — CẢNH BÁO
+═══════════════════════════════════════════════ -->
+<div id="tab-alerts" class="page">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <label style="font-size:12px;color:var(--muted);">Mức độ:</label>
+    <select id="alert-severity" onchange="loadAlerts()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;">
+      <option value="">Tất cả</option>
+      <option value="HIGH">HIGH</option>
+      <option value="MEDIUM">MEDIUM</option>
+      <option value="LOW">LOW</option>
+    </select>
+    <label style="font-size:12px;color:var(--muted);">Trạng thái:</label>
+    <select id="alert-resolved" onchange="loadAlerts()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;">
+      <option value="">Tất cả</option>
+      <option value="false">Đang hoạt động</option>
+      <option value="true">Đã xử lý</option>
+    </select>
+  </div>
+
+  <div class="grid g3" style="margin-bottom:12px;">
+    <div class="card kpi"><div class="kpi-label">Tổng cảnh báo (24h)</div><div class="kpi-val" id="alert-total" style="font-size:22px;">–</div></div>
+    <div class="card kpi"><div class="kpi-label">HIGH severity</div><div class="kpi-val" id="alert-high" style="font-size:22px;color:var(--red);">–</div></div>
+    <div class="card kpi"><div class="kpi-label">Đang hoạt động</div><div class="kpi-val" id="alert-active" style="font-size:22px;color:var(--amber);">–</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Lịch sử cảnh báo (24 giờ qua)</div>
+    <div id="alert-list"><div class="spinner">Đang tải…</div></div>
+  </div>
+</div>
+
+<script>
+const API = '';  // same origin
+const KEY = 'dev-secret-key-replace-in-prod';
+const HDR = { 'X-API-Key': KEY };
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'kline') { initKlineCharts(); setTimeout(loadKline, 50); }
+  if (name === 'flow')  loadFlow();
+  if (name === 'alerts') loadAlerts();
+}
+
+// ── Fetch helper ─────────────────────────────────────────────────────────────
+async function apiFetch(path) {
+  const r = await fetch(API + path, { headers: HDR });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+// ── Connection status ────────────────────────────────────────────────────────
+async function checkConn() {
+  try {
+    await fetch(API + '/health');
+    document.getElementById('conn-status').textContent = 'Connected';
+    document.getElementById('conn-status').className = 'ok';
+  } catch {
+    document.getElementById('conn-status').textContent = 'Offline';
+    document.getElementById('conn-status').className = '';
+  }
+}
+
+function fmt(n, dec=2) {
+  if (n == null) return '–';
+  return Number(n).toLocaleString('en-US', {minimumFractionDigits: dec, maximumFractionDigits: dec});
+}
+function fmtPct(n) {
+  if (n == null) return '–';
+  const v = Number(n);
+  return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+}
+function timeAgo(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHARTS — initialise once, update data on refresh
+// ═══════════════════════════════════════════════════════════════════════════
+const chartOpts = (extra={}) => ({
+  responsive: true, maintainAspectRatio: false, animation: false,
+  plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false,
+    backgroundColor: '#1e2535', titleColor: '#94a3b8', bodyColor: '#e2e8f0',
+    borderColor: '#2a3249', borderWidth: 1 }},
+  scales: {
+    x: { display: false, grid: { display: false } },
+    y: { display: true, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 4 },
+         grid: { color: 'rgba(42,50,73,.6)' } }
+  },
+  ...extra
+});
+
+let btcLine, volBar, rsiChart, macdChart, bbChart, flowArea, netFlowLine;
+let klineChartsInited = false, flowChartsInited = false;
+
+function initCharts() {
+  btcLine = new Chart(document.getElementById('btc-line'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ data: [], borderColor: '#3b82f6', borderWidth: 1.5,
+      pointRadius: 0, fill: true, backgroundColor: 'rgba(59,130,246,0.08)', tension: 0.3 }] },
+    options: chartOpts({ scales: { x: { display: false }, y: { display: true,
+      ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 4,
+        callback: v => '$' + Number(v).toLocaleString() },
+      grid: { color: 'rgba(42,50,73,.6)' } } } })
+  });
+
+  volBar = new Chart(document.getElementById('vol-bar'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: 'rgba(59,130,246,0.5)', borderRadius: 2 }] },
+    options: chartOpts()
+  });
+
+  flowArea = new Chart(document.getElementById('flow-area'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { label: 'Buy', data: [], backgroundColor: 'rgba(34,197,94,0.5)', borderRadius: 2 },
+      { label: 'Sell', data: [], backgroundColor: 'rgba(239,68,68,0.5)', borderRadius: 2 },
+    ]},
+    options: chartOpts({ plugins: { legend: { display: true, labels: { color: '#64748b', font: { size: 10 } } } },
+      scales: { x: { display: false, stacked: true }, y: { display: true, stacked: false,
+        ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 3 },
+        grid: { color: 'rgba(42,50,73,.6)' } } }
+    })
+  });
+
+  netFlowLine = new Chart(document.getElementById('net-flow-line'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ data: [], borderColor: '#f59e0b', borderWidth: 1.5, pointRadius: 0,
+      fill: true, backgroundColor: 'rgba(245,158,11,0.08)', tension: 0.3 }] },
+    options: chartOpts()
+  });
+}
+
+function initKlineCharts() {
+  if (klineChartsInited) return;
+  klineChartsInited = true;
+  rsiChart = new Chart(document.getElementById('rsi-chart'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ data: [], borderColor: '#f59e0b', borderWidth: 1.5, pointRadius: 0, tension: 0.3 }] },
+    options: chartOpts({ scales: { x: { display: false }, y: { display: true, min: 0, max: 100,
+      ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 4 },
+      grid: { color: 'rgba(42,50,73,.6)' } } } })
+  });
+  macdChart = new Chart(document.getElementById('macd-chart'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { data: [], backgroundColor: (ctx) => (ctx.raw ?? 0) >= 0 ? 'rgba(34,197,94,0.5)' : 'rgba(239,68,68,0.5)', borderRadius: 2 }
+    ]},
+    options: chartOpts()
+  });
+  bbChart = new Chart(document.getElementById('bb-chart'), {
+    type: 'line',
+    data: { labels: [], datasets: [
+      { data: [], borderColor: 'rgba(59,130,246,0.4)', borderWidth: 1, pointRadius: 0, fill: false },
+      { data: [], borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0, fill: false },
+      { data: [], borderColor: 'rgba(59,130,246,0.4)', borderWidth: 1, pointRadius: 0, fill: '-2', backgroundColor: 'rgba(59,130,246,0.06)' }
+    ]},
+    options: chartOpts()
+  });
+}
+
+// ── Gauge (manual canvas) ────────────────────────────────────────────────────
+function drawGauge(pct) {
+  const canvas = document.getElementById('gauge-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const cx = canvas.width / 2, cy = canvas.height - 8, r = 52;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, 0);
+  ctx.strokeStyle = 'rgba(42,50,73,1)'; ctx.lineWidth = 14; ctx.stroke();
+  const split = Math.PI + pct * Math.PI;
+  ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, split);
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 12; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, r, split, 0);
+  ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 12; ctx.stroke();
+  const ang = Math.PI + pct * Math.PI;
+  ctx.beginPath(); ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + (r - 8) * Math.cos(ang), cy + (r - 8) * Math.sin(ang));
+  ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+  ctx.fillStyle = '#e2e8f0'; ctx.fill();
+}
+
+// ── Candlestick (manual canvas) ──────────────────────────────────────────────
+function drawCandles(candles) {
+  const canvas = document.getElementById('kline-canvas');
+  const parent = canvas.parentElement;
+  const w = parent.getBoundingClientRect().width || parent.offsetWidth || parent.clientWidth || 800;
+  canvas.width = Math.max(w, 300);
+  canvas.height = 200;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!candles || !candles.length) return;
+  const slice = candles.slice(-50);
+  const prices = slice.flatMap(c => [c.high, c.low]);
+  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  const range = maxP - minP || 1;
+  const pad = { t: 12, b: 12, l: 4, r: 4 };
+  const W = canvas.width - pad.l - pad.r, H = canvas.height - pad.t - pad.b;
+  const cw = W / slice.length;
+  const toY = p => pad.t + H - ((p - minP) / range) * H;
+  slice.forEach((c, i) => {
+    const x = pad.l + i * cw;
+    const bull = c.close >= c.open;
+    ctx.strokeStyle = bull ? '#22c55e' : '#ef4444';
+    ctx.fillStyle   = bull ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
+    ctx.lineWidth = 1;
+    const midX = x + cw / 2;
+    ctx.beginPath(); ctx.moveTo(midX, toY(c.high)); ctx.lineTo(midX, toY(c.low)); ctx.stroke();
+    const bodyTop = toY(Math.max(c.open, c.close));
+    const bodyH   = Math.max(1, Math.abs(toY(c.open) - toY(c.close)));
+    ctx.fillRect(x + cw * .15, bodyTop, cw * .7, bodyH);
+    ctx.strokeRect(x + cw * .15, bodyTop, cw * .7, bodyH);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA LOADERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Tab 1: Overview ──────────────────────────────────────────────────────────
+let btcHistory = [];
+
+async function loadOverview() {
+  try {
+    const prices = await apiFetch('/prices/latest');
+    if (!prices.length) return;
+
+    const bySymbol = {};
+    prices.forEach(p => bySymbol[p.symbol] = p);
+
+    const btc = bySymbol['BTCUSDT'];
+    if (btc) {
+      document.getElementById('kpi-btc-price').textContent = '$' + fmt(btc.last_price);
+      const chgEl = document.getElementById('kpi-btc-chg');
+      chgEl.textContent = fmtPct(btc.price_change_pct);
+      chgEl.className = 'kpi-sub ' + (btc.price_change_pct >= 0 ? 'up' : 'down');
+      btcHistory.push(btc.last_price);
+      if (btcHistory.length > 60) btcHistory.shift();
+      btcLine.data.labels = btcHistory.map((_, i) => i);
+      btcLine.data.datasets[0].data = [...btcHistory];
+      btcLine.update('none');
+    }
+
+    const eth = bySymbol['ETHUSDT'];
+    if (eth) {
+      document.getElementById('kpi-eth-price').textContent = '$' + fmt(eth.last_price);
+      const e = document.getElementById('kpi-eth-chg');
+      e.textContent = fmtPct(eth.price_change_pct);
+      e.className = 'kpi-sub ' + (eth.price_change_pct >= 0 ? 'up' : 'down');
+    }
+
+    const bnb = bySymbol['BNBUSDT'];
+    if (bnb) {
+      document.getElementById('kpi-bnb-price').textContent = '$' + fmt(bnb.last_price);
+      const e = document.getElementById('kpi-bnb-chg');
+      e.textContent = fmtPct(bnb.price_change_pct);
+      e.className = 'kpi-sub ' + (bnb.price_change_pct >= 0 ? 'up' : 'down');
+    }
+
+    document.getElementById('kpi-session').textContent = prices[0]?.trading_session ?? '–';
+    document.getElementById('kpi-symbols').textContent = prices.length + ' symbols';
+
+    // Price table
+    const tbody = document.getElementById('price-table');
+    tbody.innerHTML = prices.map(p => `
+      <tr>
+        <td><strong>${p.symbol}</strong></td>
+        <td>$${fmt(p.last_price)}</td>
+        <td class="${p.price_change >= 0 ? 'up' : 'down'}">${p.price_change >= 0 ? '+' : ''}${fmt(p.price_change)}</td>
+        <td class="${p.price_change_pct >= 0 ? 'up' : 'down'}">${fmtPct(p.price_change_pct)}</td>
+        <td>${fmt(p.volume, 4)}</td>
+        <td>${Number(p.trade_count).toLocaleString()}</td>
+        <td>${p.trading_session ?? '–'}</td>
+      </tr>`).join('');
+
+    // Volume bar (sum all symbols)
+    const totalVol = prices.reduce((s, p) => s + Number(p.volume || 0), 0);
+    volBar.data.labels.push('');
+    volBar.data.datasets[0].data.push(+totalVol.toFixed(4));
+    if (volBar.data.labels.length > 60) { volBar.data.labels.shift(); volBar.data.datasets[0].data.shift(); }
+    volBar.update('none');
+
+    // Gauge — average buy_pct from orderflow (try, don't block overview)
+    try {
+      const of = await apiFetch('/orderflow');
+      if (of.length) {
+        const avgBuy = of.reduce((s, r) => s + Number(r.buy_pct || 0), 0) / of.length;
+        drawGauge(avgBuy / 100);
+        document.getElementById('gauge-label').textContent =
+          (avgBuy >= 50 ? avgBuy.toFixed(0) + '% Mua' : (100 - avgBuy).toFixed(0) + '% Bán');
+        document.getElementById('gauge-label').className =
+          'gauge-label ' + (avgBuy >= 50 ? 'up' : 'down');
+      }
+    } catch {}
+
+    // Spread heatmap from prices (use price_change_pct as proxy if no spread endpoint)
+    renderSpreadHeatmap(prices);
+
+    document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString('vi-VN');
+  } catch (err) {
+    console.error('loadOverview error', err);
+  }
+}
+
+function renderSpreadHeatmap(prices) {
+  const container = document.getElementById('spread-heatmap');
+  const maxChg = Math.max(...prices.map(p => Math.abs(Number(p.price_change_pct || 0)))) || 1;
+  container.innerHTML = prices.slice(0, 8).map(p => {
+    const abs = Math.abs(Number(p.price_change_pct || 0));
+    const pct = Math.min(100, (abs / maxChg) * 100);
+    const color = abs > maxChg * 0.6 ? '#ef4444' : abs > maxChg * 0.3 ? '#f59e0b' : '#22c55e';
+    return `<div class="heatmap-row">
+      <span class="heatmap-sym">${p.symbol.replace('USDT','')}</span>
+      <div class="heatmap-bar-wrap"><div class="heatmap-bar" style="width:${pct}%;background:${color}20;border-left:3px solid ${color};"></div></div>
+      <span class="heatmap-val" style="color:${color}">${fmtPct(p.price_change_pct)}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Tab 2: Kline ─────────────────────────────────────────────────────────────
+async function loadKline() {
+  initKlineCharts();
+  const symbol = document.getElementById('kline-symbol').value;
+  try {
+    const [latestArr, history, candles] = await Promise.all([
+      apiFetch(`/technical/${symbol}?limit=1`),
+      apiFetch(`/technical/${symbol}?limit=50`),
+      apiFetch(`/prices/${symbol}/history?window=1s&limit=50`),
+    ]);
+    if (!history.length) return;
+
+    const latest = latestArr[0] ?? {};
+    const labels = history.map(d => d.open_time ? new Date(d.open_time).toLocaleTimeString('vi-VN') : '');
+
+    // KPI cards
+    if (latest.rsi_14 != null) {
+      const rsiEl = document.getElementById('rsi-val');
+      rsiEl.textContent = Number(latest.rsi_14).toFixed(1);
+      rsiEl.className = 'kpi-val ' + (latest.rsi_14 > 70 ? 'down' : latest.rsi_14 < 30 ? 'up' : '');
+    }
+    if (latest.macd != null) {
+      const macdEl = document.getElementById('macd-val');
+      const m = Number(latest.macd);
+      macdEl.textContent = (m >= 0 ? '+' : '') + m.toFixed(2);
+      macdEl.className = 'kpi-val ' + (m >= 0 ? 'up' : 'down');
+    }
+    if (latest.bb_width != null) document.getElementById('bb-val').textContent = Number(latest.bb_width).toFixed(2);
+    if (latest.composite_signal != null) document.getElementById('sig-val').textContent = latest.composite_signal;
+
+    // Candlestick dùng price history (có OHLCV)
+    if (candles.length) requestAnimationFrame(() => drawCandles(candles));
+
+    // RSI chart
+    rsiChart.data.labels = labels;
+    rsiChart.data.datasets[0].data = history.map(d => d.rsi_14);
+    rsiChart.update('none');
+
+    // MACD histogram
+    macdChart.data.labels = labels;
+    macdChart.data.datasets[0].data = history.map(d => d.macd_hist);
+    macdChart.data.datasets[0].backgroundColor = history.map(d => (d.macd_hist ?? 0) >= 0 ? 'rgba(34,197,94,0.5)' : 'rgba(239,68,68,0.5)');
+    macdChart.update('none');
+
+    // Bollinger Bands
+    bbChart.data.labels = labels;
+    bbChart.data.datasets[0].data = history.map(d => d.bb_upper);
+    bbChart.data.datasets[1].data = history.map(d => d.bb_middle);
+    bbChart.data.datasets[2].data = history.map(d => d.bb_lower);
+    bbChart.update('none');
+  } catch (err) {
+    console.error('loadKline error', err);
+  }
+}
+
+// ── Tab 3: Order Flow ─────────────────────────────────────────────────────────
+async function loadFlow() {
+  const symbol = document.getElementById('flow-symbol').value;
+  try {
+    const [detail, summary] = await Promise.all([
+      apiFetch(`/orderflow/${symbol}?limit=60`),
+      apiFetch('/orderflow'),
+    ]);
+
+    if (detail.length) {
+      const totalBuy  = detail.reduce((s, r) => s + Number(r.buy_volume  || 0), 0);
+      const totalSell = detail.reduce((s, r) => s + Number(r.sell_volume || 0), 0);
+      const netFlow   = totalBuy - totalSell;
+      document.getElementById('flow-buy').textContent  = fmt(totalBuy, 4);
+      document.getElementById('flow-sell').textContent = fmt(totalSell, 4);
+      const netEl = document.getElementById('flow-net');
+      netEl.textContent = (netFlow >= 0 ? '+' : '') + fmt(netFlow, 4);
+      netEl.className = 'kpi-val ' + (netFlow >= 0 ? 'up' : 'down');
+
+      const labels = detail.map(d => '');
+      flowArea.data.labels = labels;
+      flowArea.data.datasets[0].data = detail.map(d => d.buy_volume);
+      flowArea.data.datasets[1].data = detail.map(d => d.sell_volume);
+      flowArea.update('none');
+
+      netFlowLine.data.labels = labels;
+      netFlowLine.data.datasets[0].data = detail.map(d => d.net_flow);
+      netFlowLine.data.datasets[0].backgroundColor = 'rgba(245,158,11,0.08)';
+      netFlowLine.update('none');
+    }
+
+    if (summary.length) {
+      document.getElementById('flow-table').innerHTML = summary.map(r => `
+        <tr>
+          <td><strong>${r.symbol}</strong></td>
+          <td class="up">${fmt(r.total_buy, 4)}</td>
+          <td class="down">${fmt(r.total_sell, 4)}</td>
+          <td class="${Number(r.net_flow) >= 0 ? 'up' : 'down'}">${(Number(r.net_flow) >= 0 ? '+' : '')}${fmt(r.net_flow, 4)}</td>
+          <td>${fmt(r.buy_pct, 1)}%</td>
+          <td>${r.pressure_state ?? '–'}</td>
+        </tr>`).join('');
+    }
+  } catch (err) {
+    console.error('loadFlow error', err);
+  }
+}
+
+// ── Tab 4: Alerts ─────────────────────────────────────────────────────────────
+async function loadAlerts() {
+  const sev = document.getElementById('alert-severity').value;
+  const res = document.getElementById('alert-resolved').value;
+  let url = '/alerts?limit=100';
+  if (sev) url += '&severity=' + sev;
+  if (res) url += '&resolved=' + res;
+  try {
+    const alerts = await apiFetch(url);
+
+    document.getElementById('alert-total').textContent  = alerts.length;
+    document.getElementById('alert-high').textContent   = alerts.filter(a => a.severity === 'HIGH').length;
+    document.getElementById('alert-active').textContent = alerts.filter(a => !a.is_resolved).length;
+
+    const list = document.getElementById('alert-list');
+    if (!alerts.length) { list.innerHTML = '<div class="spinner">Không có cảnh báo nào</div>'; return; }
+
+    list.innerHTML = alerts.map(a => {
+      const badge = a.severity === 'HIGH' ? 'badge-high' : a.severity === 'MEDIUM' ? 'badge-med' : 'badge-low';
+      return `<div class="alert-row">
+        <span class="alert-sym">${a.symbol}</span>
+        <span class="badge ${badge}">${a.severity}</span>
+        <span class="alert-desc">${a.alert_description ?? a.alert_code}</span>
+        <span class="alert-time">${a.triggered_at ? timeAgo(a.triggered_at) : '–'}</span>
+        <span style="font-size:10px;color:${a.is_resolved ? 'var(--green)' : 'var(--amber)'}">${a.is_resolved ? '✓' : '●'}</span>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    console.error('loadAlerts error', err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT & POLLING
+// ═══════════════════════════════════════════════════════════════════════════
+initCharts();
+checkConn();
+loadOverview();
+
+// Refresh every 2s for overview, 30s for active tab data
+setInterval(loadOverview, 2000);
+setInterval(() => {
+  const active = document.querySelector('.page.active')?.id;
+  if (active === 'tab-kline')  loadKline();
+  if (active === 'tab-flow')   loadFlow();
+  if (active === 'tab-alerts') loadAlerts();
+  checkConn();
+}, 30000);
+</script>
+</body>
+</html>
