@@ -225,7 +225,7 @@ def main():
     query_1s = (
         agg_1s.writeStream
         .outputMode("append")
-        .trigger(processingTime="5 seconds")
+        .trigger(processingTime="1 second")
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/1s")
         .foreachBatch(write_1s)
         .start()
