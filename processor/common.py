@@ -18,10 +18,16 @@ DATABASE_URL = os.getenv(
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 CHECKPOINT_BASE = os.getenv("CHECKPOINT_DIR", "/opt/spark-checkpoints")
 
-JDBC_URL = DATABASE_URL.replace("postgresql://", "jdbc:postgresql://")
+# Parse: postgresql://user:pass@host:port/db
+_db_url_body = DATABASE_URL.split("://")[1]          # user:pass@host:port/db
+_db_userinfo, _db_hostpart = _db_url_body.split("@") # user:pass | host:port/db
+_db_user, _db_pass = _db_userinfo.split(":", 1)
+_db_host_port, _db_name = _db_hostpart.split("/", 1)
+
+JDBC_URL = f"jdbc:postgresql://{_db_host_port}/{_db_name}"
 JDBC_PROPS = {
-    "user":     DATABASE_URL.split("://")[1].split(":")[0],
-    "password": DATABASE_URL.split(":")[2].split("@")[0],
+    "user":     _db_user,
+    "password": _db_pass,
     "driver":   "org.postgresql.Driver",
     "batchsize": "1000",
 }
