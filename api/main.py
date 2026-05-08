@@ -190,15 +190,46 @@ async def get_price_history(
 
 
 # ---------------------------------------------------------------------------
-# 4. GET /orderflow — order flow summary tất cả symbols
+# 4. GET /orderflow — order flow summary tất cả symbols (30 giây gần nhất)
 # ---------------------------------------------------------------------------
 @app.get("/orderflow", tags=["orderflow"], dependencies=[Security(verify_key)])
 async def get_orderflow_summary():
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT symbol, total_buy, total_sell, total_volume,
-                   net_flow, buy_pct, sell_pct, pressure_state, as_of
-            FROM mart_orderflow_summary
+            WITH recent AS (
+                SELECT
+                    s.symbol,
+                    SUM(of.buy_volume)  AS total_buy,
+                    SUM(of.sell_volume) AS total_sell,
+                    SUM(of.total_volume) AS total_volume,
+                    SUM(of.net_flow)    AS net_flow,
+                    MAX(of.window_start) AS as_of_ms
+                FROM fact_order_flow of
+                JOIN dim_symbol s      ON of.symbol_key = s.symbol_key
+                JOIN dim_window_type w ON of.window_key  = w.window_key
+                WHERE w.window_label = '1s'
+                  AND of.window_start >= (EXTRACT(EPOCH FROM NOW()) * 1000 - 30000)::bigint
+                GROUP BY s.symbol
+            )
+            SELECT
+                symbol,
+                total_buy,
+                total_sell,
+                total_volume,
+                net_flow,
+                CASE WHEN total_volume > 0
+                     THEN ROUND((total_buy / total_volume * 100)::numeric, 2)
+                     ELSE 50 END                                  AS buy_pct,
+                CASE WHEN total_volume > 0
+                     THEN ROUND((total_sell / total_volume * 100)::numeric, 2)
+                     ELSE 50 END                                  AS sell_pct,
+                CASE
+                    WHEN net_flow > 0 THEN 'BUY_PRESSURE'
+                    WHEN net_flow < 0 THEN 'SELL_PRESSURE'
+                    ELSE 'NEUTRAL'
+                END                                               AS pressure_state,
+                TO_TIMESTAMP(as_of_ms / 1000)                     AS as_of
+            FROM recent
             ORDER BY ABS(net_flow) DESC
         """)
     return [dict(r) for r in rows]
@@ -241,29 +272,30 @@ async def get_technical(
 ):
     symbol = symbol.upper()
     async with pool.acquire() as conn:
-        if limit == 1:
-            rows = await conn.fetch("""
-                SELECT symbol, open_time, candle_time,
-                       open, high, low, close, volume, is_bullish,
-                       rsi_14, rsi_signal,
-                       macd, macd_signal, macd_hist, macd_signal_dir,
-                       bb_upper, bb_middle, bb_lower, bb_width,
-                       atr_14, obv, composite_signal
-                FROM mart_technical_signals
-                WHERE symbol = $1
-            """, symbol)
-        else:
-            rows = await conn.fetch("""
-                SELECT ti.open_time,
-                       ti.rsi_14, ti.macd, ti.macd_signal, ti.macd_hist,
-                       ti.bb_upper, ti.bb_middle, ti.bb_lower, ti.bb_width,
-                       ti.atr_14, ti.obv
-                FROM fact_technical_indicator ti
-                JOIN dim_symbol s ON ti.symbol_key = s.symbol_key
-                WHERE s.symbol = $1
-                ORDER BY ti.open_time DESC
-                LIMIT $2
-            """, symbol, limit)
+        rows = await conn.fetch("""
+            SELECT
+                s.symbol,
+                TO_TIMESTAMP(ti.open_time / 1000)  AS open_time,
+                TO_TIMESTAMP(kc.close_time / 1000) AS candle_time,
+                kc.open, kc.high, kc.low, kc.close, kc.volume,
+                kc.is_bullish,
+                ti.rsi_14,
+                CASE WHEN ti.rsi_14 >= 70 THEN 'OVERBOUGHT'
+                     WHEN ti.rsi_14 <= 30 THEN 'OVERSOLD'
+                     ELSE 'NEUTRAL' END            AS rsi_signal,
+                ti.macd, ti.macd_signal, ti.macd_hist,
+                CASE WHEN ti.macd > ti.macd_signal THEN 'BULLISH'
+                     ELSE 'BEARISH' END            AS macd_signal_dir,
+                ti.bb_upper, ti.bb_middle, ti.bb_lower, ti.bb_width,
+                ti.atr_14, ti.obv
+            FROM fact_technical_indicator ti
+            JOIN dim_symbol s        ON ti.symbol_key   = s.symbol_key
+            JOIN fact_kline_closed kc ON ti.symbol_key  = kc.symbol_key
+                                     AND ti.open_time   = kc.open_time
+            WHERE s.symbol = $1
+            ORDER BY ti.open_time DESC
+            LIMIT $2
+        """, symbol, limit)
     if not rows:
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
     return [dict(r) for r in rows]
@@ -293,12 +325,31 @@ async def get_alerts(
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
-            SELECT alert_key, symbol, alert_code, alert_description,
-                   severity, triggered_at, trigger_value, threshold_pct,
-                   is_resolved, resolved_at, trading_session
-            FROM mart_alert_summary
-            WHERE {where}
-            ORDER BY triggered_at DESC
+            SELECT
+                pa.alert_key,
+                s.symbol,
+                at.alert_code,
+                at.alert_description,
+                pa.severity,
+                TO_TIMESTAMP(pa.triggered_at / 1000) AS triggered_at,
+                pa.trigger_value,
+                pa.threshold_pct,
+                pa.is_resolved,
+                TO_TIMESTAMP(pa.resolved_at / 1000)  AS resolved_at,
+                CASE
+                    WHEN EXTRACT(HOUR FROM TO_TIMESTAMP(pa.triggered_at/1000)) BETWEEN 1 AND 8
+                    THEN 'Asia'
+                    WHEN EXTRACT(HOUR FROM TO_TIMESTAMP(pa.triggered_at/1000)) BETWEEN 8 AND 16
+                    THEN 'Europe'
+                    ELSE 'US'
+                END AS trading_session
+            FROM fact_price_alert pa
+            JOIN dim_symbol s     ON pa.symbol_key     = s.symbol_key
+            JOIN dim_alert_type at ON pa.alert_type_key = at.alert_type_key
+            WHERE pa.triggered_at > (EXTRACT(EPOCH FROM NOW()) * 1000 - 86400000)::bigint
+              {('AND pa.severity = $1' if severity else '')}
+              {('AND pa.is_resolved = $' + str(len(params)) if resolved is not None else '')}
+            ORDER BY pa.triggered_at DESC
             LIMIT ${len(params)}
         """, *params)
 
