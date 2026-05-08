@@ -14,9 +14,7 @@ Chạy:
     processor/job1_trade_agg.py
 """
 import os
-import json
-import threading
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, LongType,
@@ -26,7 +24,6 @@ from pyspark.sql.types import (
 from processor.common import (
     KAFKA_BOOTSTRAP, JDBC_URL, JDBC_PROPS, CHECKPOINT_BASE,
     load_symbol_map, load_window_map,
-    epoch_ms_to_datetime_key,
 )
 
 CHECKPOINT_DIR = f"{CHECKPOINT_BASE}/trade_agg"
@@ -43,103 +40,113 @@ TRADE_SCHEMA = StructType([
 ])
 
 
-def write_agg_batch(batch_df, batch_id, window_label: str):
-    """foreachBatch writer — map dim keys, upsert vào PostgreSQL."""
-    try:
-        _write_agg_batch_inner(batch_df, batch_id, window_label)
-    except Exception as e:
-        import traceback
-        print(f"[ERROR] batch_id={batch_id} window={window_label}: {e}")
-        traceback.print_exc()
+def build_dim_maps(spark: SparkSession):
+    """Load symbol_map và window_map một lần, broadcast cho toàn cluster."""
+    symbol_map = load_symbol_map()
+    window_map = load_window_map()
+    bc_symbol = spark.sparkContext.broadcast(symbol_map)
+    bc_window = spark.sparkContext.broadcast(window_map)
+    return bc_symbol, bc_window
 
 
-def _write_agg_batch_inner(batch_df, batch_id, window_label: str):
+def write_trade_agg(batch_df: DataFrame, batch_id: int, window_label: str,
+                    bc_symbol, bc_window):
+    """Bulk-write fact_trade_agg + fact_order_flow dùng JDBC — không collect()."""
     if batch_df.isEmpty():
         return
 
-    symbol_map  = load_symbol_map()
-    window_map  = load_window_map()
+    win_key = bc_window.value.get(window_label)
+    if win_key is None:
+        print(f"[WARN] window_label '{window_label}' không có trong dim_window_type")
+        return
 
-    rows = batch_df.collect()
+    # Map symbol → symbol_key bằng UDF broadcast (chạy trên executor)
+    symbol_map_val = bc_symbol.value
 
-    trade_agg_rows  = []
-    order_flow_rows = []
+    @F.udf("int")
+    def sym_to_key(sym):
+        return symbol_map_val.get(sym)
 
-    for row in rows:
-        sym_key = symbol_map.get(row["symbol"])
-        win_key = window_map.get(window_label)
-        if sym_key is None or win_key is None:
-            continue
+    @F.udf("long")
+    def epoch_to_dt_key(epoch_ms):
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+        return int(dt.strftime("%Y%m%d%H%M"))
 
-        w_start = int(row["window_start"].timestamp() * 1000)
-        w_end   = int(row["window_end"].timestamp()   * 1000)
-        dt_key  = epoch_ms_to_datetime_key(w_start)
+    enriched = (
+        batch_df
+        .withColumn("symbol_key", sym_to_key(F.col("symbol")))
+        .withColumn("window_start_ms", (F.unix_timestamp(F.col("window_start")) * 1000).cast("long"))
+        .withColumn("window_end_ms",   (F.unix_timestamp(F.col("window_end"))   * 1000).cast("long"))
+        .withColumn("datetime_key", epoch_to_dt_key(F.col("window_start_ms")))
+        .withColumn("window_key", F.lit(win_key))
+        .filter(F.col("symbol_key").isNotNull())
+    )
 
-        open_p  = row["open"]
-        close_p = row["close"]
-        p_chg   = close_p - open_p
-        p_chg_pct = (p_chg / open_p * 100) if open_p else 0.0
+    # ── fact_trade_agg ──────────────────────────────────────────────────────
+    trade_agg_df = (
+        enriched
+        .withColumn("price_change",     F.col("close") - F.col("open"))
+        .withColumn("price_change_pct",
+            F.when(F.col("open") != 0,
+                (F.col("close") - F.col("open")) / F.col("open") * 100
+            ).otherwise(F.lit(0.0))
+        )
+        .select(
+            "symbol_key", "datetime_key", "window_key",
+            F.col("window_start_ms").alias("window_start"),
+            F.col("window_end_ms").alias("window_end"),
+            "open", "high", "low", "close",
+            "volume", "vwap", "trade_count",
+            "price_change", "price_change_pct",
+        )
+    )
 
-        trade_agg_rows.append((
-            sym_key, dt_key, win_key,
-            w_start, w_end,
-            open_p, row["high"], row["low"], close_p,
-            row["volume"], row["vwap"],
-            row["trade_count"],
-            p_chg, p_chg_pct,
-        ))
+    (
+        trade_agg_df.write
+        .mode("append")
+        .option("driver", "org.postgresql.Driver")
+        .option("batchsize", "2000")
+        .option("isolationLevel", "READ_COMMITTED")
+        .jdbc(JDBC_URL, "fact_trade_agg", properties=JDBC_PROPS)
+    )
 
-        total_vol = row["buy_volume"] + row["sell_volume"]
-        buy_pct   = (row["buy_volume"] / total_vol * 100) if total_vol else 50.0
-        net_flow  = row["buy_volume"] - row["sell_volume"]
+    # ── fact_order_flow ─────────────────────────────────────────────────────
+    order_flow_df = (
+        enriched
+        .withColumn("total_volume", F.col("buy_volume") + F.col("sell_volume"))
+        .withColumn("buy_pct",
+            F.when(
+                (F.col("buy_volume") + F.col("sell_volume")) > 0,
+                F.col("buy_volume") / (F.col("buy_volume") + F.col("sell_volume")) * 100
+            ).otherwise(F.lit(50.0))
+        )
+        .withColumn("net_flow", F.col("buy_volume") - F.col("sell_volume"))
+        .select(
+            "symbol_key", "datetime_key", "window_key",
+            F.col("window_start_ms").alias("window_start"),
+            "buy_volume", "sell_volume", "total_volume",
+            "buy_count", "sell_count",
+            "buy_pct", "net_flow",
+        )
+    )
 
-        order_flow_rows.append((
-            sym_key, dt_key, win_key,
-            w_start,
-            row["buy_volume"], row["sell_volume"], total_vol,
-            row["buy_count"], row["sell_count"],
-            buy_pct, net_flow,
-        ))
-
-    import psycopg2
-    from processor.common import get_conn
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.executemany("""
-                INSERT INTO fact_trade_agg
-                    (symbol_key, datetime_key, window_key,
-                     window_start, window_end,
-                     open, high, low, close,
-                     volume, vwap, trade_count,
-                     price_change, price_change_pct)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (symbol_key, window_start, window_key) DO NOTHING
-            """, trade_agg_rows)
-
-            cur.executemany("""
-                INSERT INTO fact_order_flow
-                    (symbol_key, datetime_key, window_key,
-                     window_start,
-                     buy_volume, sell_volume, total_volume,
-                     buy_count, sell_count,
-                     buy_pct, net_flow)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (symbol_key, window_start, window_key) DO NOTHING
-            """, order_flow_rows)
-
-        conn.commit()
+    (
+        order_flow_df.write
+        .mode("append")
+        .option("driver", "org.postgresql.Driver")
+        .option("batchsize", "2000")
+        .option("isolationLevel", "READ_COMMITTED")
+        .jdbc(JDBC_URL, "fact_order_flow", properties=JDBC_PROPS)
+    )
 
 
-def build_agg_query(parsed_df, window_duration: str):
+def build_agg_query(parsed_df: DataFrame, window_duration: str) -> DataFrame:
     """Aggregate OHLCV + order flow cho một window size."""
-    windowed = (
+    return (
         parsed_df
         .withWatermark("event_time", "2 seconds")
-        .groupBy(
-            F.window("event_time", window_duration),
-            "symbol",
-        )
+        .groupBy(F.window("event_time", window_duration), "symbol")
         .agg(
             F.first("price").alias("open"),
             F.max("price").alias("high"),
@@ -148,19 +155,10 @@ def build_agg_query(parsed_df, window_duration: str):
             F.sum("quantity").alias("volume"),
             (F.sum(F.col("price") * F.col("quantity")) / F.sum("quantity")).alias("vwap"),
             F.count("*").alias("trade_count"),
-            # Order flow: buyer_maker=false → lệnh MUA chủ động
-            F.sum(
-                F.when(F.col("buyer_maker") == False, F.col("quantity")).otherwise(0.0)
-            ).alias("buy_volume"),
-            F.sum(
-                F.when(F.col("buyer_maker") == True, F.col("quantity")).otherwise(0.0)
-            ).alias("sell_volume"),
-            F.sum(
-                F.when(F.col("buyer_maker") == False, F.lit(1)).otherwise(0)
-            ).alias("buy_count"),
-            F.sum(
-                F.when(F.col("buyer_maker") == True, F.lit(1)).otherwise(0)
-            ).alias("sell_count"),
+            F.sum(F.when(~F.col("buyer_maker"), F.col("quantity")).otherwise(0.0)).alias("buy_volume"),
+            F.sum(F.when( F.col("buyer_maker"), F.col("quantity")).otherwise(0.0)).alias("sell_volume"),
+            F.sum(F.when(~F.col("buyer_maker"), F.lit(1)).otherwise(0)).alias("buy_count"),
+            F.sum(F.when( F.col("buyer_maker"), F.lit(1)).otherwise(0)).alias("sell_count"),
         )
         .select(
             F.col("window.start").alias("window_start"),
@@ -170,20 +168,20 @@ def build_agg_query(parsed_df, window_duration: str):
             "buy_volume", "sell_volume", "buy_count", "sell_count",
         )
     )
-    return windowed
 
 
 def main():
     spark = (
         SparkSession.builder
         .appName("TradeAggregator")
-        .config("spark.sql.shuffle.partitions", "8")
+        .config("spark.sql.shuffle.partitions", "4")
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
 
-    # Đọc từ Kafka
+    bc_symbol, bc_window = build_dim_maps(spark)
+
     raw = (
         spark.readStream
         .format("kafka")
@@ -191,54 +189,40 @@ def main():
         .option("subscribe", "binance.trades")
         .option("startingOffsets", "latest")
         .option("failOnDataLoss", "false")
+        .option("maxOffsetsPerTrigger", "50000")
         .load()
     )
 
-    # Parse JSON
     parsed = (
         raw
         .select(F.from_json(F.col("value").cast("string"), TRADE_SCHEMA).alias("d"))
         .select("d.*")
         .filter(
-            F.col("price").isNotNull() &
-            (F.col("price") > 0) &
-            F.col("quantity").isNotNull() &
-            (F.col("quantity") > 0) &
+            F.col("price").isNotNull() & (F.col("price") > 0) &
+            F.col("quantity").isNotNull() & (F.col("quantity") > 0) &
             F.col("symbol").isNotNull()
         )
         .withColumn("event_time", (F.col("trade_time") / 1000).cast("timestamp"))
     )
 
-    # Serialize foreachBatch calls to avoid py4j concurrent callback issues
-    _lock = threading.Lock()
-
-    def write_1s(df, bid):
-        with _lock:
-            write_agg_batch(df, bid, "1s")
-
-    def write_5s(df, bid):
-        with _lock:
-            write_agg_batch(df, bid, "5s")
-
-    # Window 1 giây
     agg_1s = build_agg_query(parsed, "1 second")
+    agg_5s = build_agg_query(parsed, "5 seconds")
+
     query_1s = (
         agg_1s.writeStream
         .outputMode("append")
         .trigger(processingTime="1 second")
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/1s")
-        .foreachBatch(write_1s)
+        .foreachBatch(lambda df, bid: write_trade_agg(df, bid, "1s", bc_symbol, bc_window))
         .start()
     )
 
-    # Window 5 giây
-    agg_5s = build_agg_query(parsed, "5 seconds")
     query_5s = (
         agg_5s.writeStream
         .outputMode("append")
         .trigger(processingTime="5 seconds")
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/5s")
-        .foreachBatch(write_5s)
+        .foreachBatch(lambda df, bid: write_trade_agg(df, bid, "5s", bc_symbol, bc_window))
         .start()
     )
 
