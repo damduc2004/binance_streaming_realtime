@@ -100,18 +100,63 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
-# 2. GET /prices/latest — giá mới nhất tất cả symbols
+# 2. GET /prices/latest — giá mới nhất tất cả symbols (đọc thẳng fact table)
 # ---------------------------------------------------------------------------
 @app.get("/prices/latest", tags=["prices"], dependencies=[Security(verify_key)])
 async def get_latest_prices():
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT symbol, display_name, category,
-                   last_price, vwap, volume,
-                   price_change, price_change_pct,
-                   trade_count, updated_at, trading_session
-            FROM mart_latest_prices
-            ORDER BY symbol
+            WITH latest AS (
+                SELECT DISTINCT ON (s.symbol)
+                    s.symbol,
+                    s.display_name,
+                    s.category,
+                    ta.close                                    AS last_price,
+                    ta.vwap,
+                    ta.volume,
+                    ta.trade_count,
+                    ta.window_start,
+                    TO_TIMESTAMP(ta.window_start / 1000)        AS updated_at
+                FROM fact_trade_agg ta
+                JOIN dim_symbol s      ON ta.symbol_key = s.symbol_key
+                JOIN dim_window_type w ON ta.window_key  = w.window_key
+                WHERE w.window_label = '1s'
+                ORDER BY s.symbol, ta.window_start DESC
+            ),
+            prev AS (
+                SELECT DISTINCT ON (s.symbol)
+                    s.symbol,
+                    ta.close AS prev_close
+                FROM fact_trade_agg ta
+                JOIN dim_symbol s      ON ta.symbol_key = s.symbol_key
+                JOIN dim_window_type w ON ta.window_key  = w.window_key
+                WHERE w.window_label = '1s'
+                  AND ta.window_start < (
+                      SELECT MAX(ta2.window_start) - 60000
+                      FROM fact_trade_agg ta2
+                      JOIN dim_symbol s2 ON ta2.symbol_key = s2.symbol_key
+                      WHERE s2.symbol = s.symbol
+                  )
+                ORDER BY s.symbol, ta.window_start DESC
+            )
+            SELECT
+                l.symbol,
+                l.display_name,
+                l.category,
+                l.last_price,
+                l.vwap,
+                l.volume,
+                l.trade_count,
+                l.updated_at,
+                COALESCE(l.last_price - p.prev_close, 0)                        AS price_change,
+                CASE
+                    WHEN p.prev_close IS NOT NULL AND p.prev_close != 0
+                    THEN ROUND(((l.last_price - p.prev_close) / p.prev_close * 100)::numeric, 4)
+                    ELSE 0
+                END                                                               AS price_change_pct
+            FROM latest l
+            LEFT JOIN prev p ON l.symbol = p.symbol
+            ORDER BY l.symbol
         """)
     return [dict(r) for r in rows]
 
